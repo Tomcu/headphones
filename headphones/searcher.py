@@ -42,8 +42,8 @@ from bencode import bencode, bdecode
 
 # Magnet to torrent services, for Black hole. Stolen from CouchPotato.
 TORRENT_TO_MAGNET_SERVICES = [
-    'https://zoink.it/torrent/%s.torrent',
-    'http://torrage.com/torrent/%s.torrent',
+    #'https://zoink.it/torrent/%s.torrent',
+    #'http://torrage.com/torrent/%s.torrent',
     'https://torcache.net/torrent/%s.torrent',
 ]
 
@@ -164,6 +164,8 @@ def get_seed_ratio(provider):
         seed_ratio = headphones.CONFIG.WAFFLES_RATIO
     elif provider == 'Mininova':
         seed_ratio = headphones.CONFIG.MININOVA_RATIO
+    elif provider == 'Strike':
+    	seed_ratio = headphones.CONFIG.STRIKE_RATIO
     else:
         seed_ratio = None
 
@@ -228,7 +230,7 @@ def do_sorted_search(album, new, losslessOnly, choose_specific_download=False):
 
     NZB_PROVIDERS = (headphones.CONFIG.HEADPHONES_INDEXER or headphones.CONFIG.NEWZNAB or headphones.CONFIG.NZBSORG or headphones.CONFIG.OMGWTFNZBS)
     NZB_DOWNLOADERS = (headphones.CONFIG.SAB_HOST or headphones.CONFIG.BLACKHOLE_DIR or headphones.CONFIG.NZBGET_HOST)
-    TORRENT_PROVIDERS = (headphones.CONFIG.TORZNAB or headphones.CONFIG.KAT or headphones.CONFIG.PIRATEBAY or headphones.CONFIG.OLDPIRATEBAY or headphones.CONFIG.MININOVA or headphones.CONFIG.WAFFLES or headphones.CONFIG.RUTRACKER or headphones.CONFIG.WHATCD)
+    TORRENT_PROVIDERS = (headphones.CONFIG.TORZNAB or headphones.CONFIG.KAT or headphones.CONFIG.PIRATEBAY or headphones.CONFIG.OLDPIRATEBAY or headphones.CONFIG.MININOVA or headphones.CONFIG.WAFFLES or headphones.CONFIG.RUTRACKER or headphones.CONFIG.WHATCD or headphones.CONFIG.STRIKE)
 
     results = []
     myDB = db.DBConnection()
@@ -789,10 +791,11 @@ def send_to_downloader(data, bestqual, album):
                     # Randomize list of services
                     services = TORRENT_TO_MAGNET_SERVICES[:]
                     random.shuffle(services)
+                    headers = {'User-Agent': USER_AGENT}
 
                     for service in services:
-                        data = request.request_content(service % torrent_hash)
 
+                        data = request.request_content(service % torrent_hash, headers=headers)
                         if data and "torcache" in data:
                             if not torrent_to_file(download_path, data):
                                 return
@@ -1180,7 +1183,8 @@ def searchTorrent(album, new=False, losslessOnly=False, albumlength=None, choose
             "field": "seeders",
             "sorder": "desc"
         }
-        data = request.request_json(url=providerurl, params=params)
+        headers = {'User-Agent': USER_AGENT}
+        data = request.request_json(url=providerurl, params=params, headers=headers)
 
         # Process feed
         if data:
@@ -1196,7 +1200,7 @@ def searchTorrent(album, new=False, losslessOnly=False, albumlength=None, choose
                         size = int(item['size'])
 
                         if format == "2":
-                            torrent = request.request_content(url)
+                            torrent = request.request_content(url, headers=headers)
                             if not torrent or (int(torrent.find(".mp3")) > 0 and int(torrent.find(".flac")) < 1):
                                 rightformat = False
 
@@ -1521,6 +1525,57 @@ def searchTorrent(album, new=False, losslessOnly=False, albumlength=None, choose
                         resultlist.append((title, size, url, provider, "torrent", match))
                     except Exception as e:
                         logger.error(u"An unknown error occurred in the Old Pirate Bay parser: %s" % e)
+
+    # Strike
+    if headphones.CONFIG.STRIKE:
+        provider = "Strike"
+        s_term = term.replace("!", "")
+        providerurl = fix_url("https://getstrike.net/api/v2/torrents/search/?phrase=")
+
+        providerurl = providerurl + s_term + "&category=Music"
+
+        if headphones.CONFIG.PREFERRED_QUALITY == 3 or losslessOnly:
+            format = "2"
+            providerurl = providerurl + "&subcategory=Lossless"
+            maxsize = 10000000000
+        elif headphones.CONFIG.PREFERRED_QUALITY == 1 or allow_lossless:
+            format = "10"  # MP3 and FLAC
+            maxsize = 10000000000
+        else:
+            format = "8"  # MP3 only
+            maxsize = 300000000
+
+        logger.info("Searching %s using term: %s" % (provider, s_term))
+        data = request.request_json(url=providerurl)
+
+        if not data or not data.get('torrents'):
+            logger.info("No results found on %s using search term: %s" % (provider, s_term))
+        else:
+            for item in data['torrents']:
+                try:
+                    rightformat = True
+                    title = item['torrent_title']
+                    seeders = item['seeds']
+                    url = item['magnet_uri']
+                    size = int(item['size'])
+                    subcategory = item['sub_category']
+
+                    if format == 2:
+                        if subcategory != "Lossless":
+                            rightformat = False
+
+                    if rightformat and size < maxsize and minimumseeders < int(seeders):
+                        match = True
+                        logger.info('Found %s. Size: %s' % (title, helpers.bytes_to_mb(size)))
+                    else:
+                        match = False
+                        logger.info(
+                            '%s is larger than the maxsize, the wrong format or has too little seeders for this category, skipping. (Size: %i bytes, Seeders: %d, Format: %s)',
+                            title, size, int(seeders), rightformat)
+
+                    resultlist.append((title, size, url, provider, 'torrent', match))
+                except Exception as e:
+                    logger.exception("Unhandled exception in the Strike parser")
 
     # Mininova
     if headphones.CONFIG.MININOVA:
